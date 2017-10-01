@@ -1,0 +1,14 @@
+<?php
+
+/**
+ * Implements hook_theme().
+ */
+function commerce_paypal_theme($existing, $type, $theme, $path) {
+  $theme = [
+    'commerce_paypal_express_checkout' => [
+      'variables' => [],
+    ],
+  ];
+
+  return $theme;
+}

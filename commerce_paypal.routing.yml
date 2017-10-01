@@ -1,0 +1,8 @@
+
+commerce_paypal.express_checkout_payment_createPayment:
+  path: '/commerce_paypal/create-payment'
+  defaults:
+    _controller: '\Drupal\commerce_paypal\Controller\ExpressCheckoutPayment::createPayment'
+    _title: 'Create Payment'
+  requirements:
+    _permission: 'access content'
