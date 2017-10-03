@@ -5,14 +5,12 @@ namespace Drupal\commerce_paypal\Controller;
 use Drupal\commerce_cart\CartProviderInterface;
 use Drupal\commerce_order\Entity\Order;
 use Drupal\commerce_payment\Entity\Payment;
-use Drupal\commerce_payment\Exception\PaymentGatewayException;
 use Drupal\commerce_payment\PaymentGatewayManager;
-use Drupal\commerce_paypal\Plugin\Commerce\PaymentGateway\ExpressCheckout;
 use Drupal\Component\Serialization\Json;
-use Drupal\Core\Config\ConfigFactory;
 use Drupal\Core\Controller\ControllerBase;
 use Drupal\Core\Url;
 use Symfony\Component\DependencyInjection\ContainerInterface;
+use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
@@ -26,11 +24,6 @@ class ExpressCheckoutPayment extends ControllerBase {
   protected $paymentGateway;
 
   /**
-   * @var \Drupal\Core\Config\ConfigFactory
-   */
-  protected $configFactory;
-
-  /**
    * The cart provider.
    *
    * @var \Drupal\commerce_cart\CartProviderInterface
@@ -38,21 +31,46 @@ class ExpressCheckoutPayment extends ControllerBase {
   protected $cartProvider;
 
   /**
+   * The request stack.
+   *
+   * @var \Symfony\Component\HttpFoundation\RequestStack
+   */
+  protected $requestStack;
+
+  /**
+   * The payment gateway instance
+   *
+   * @var \Drupal\commerce_paypal\Plugin\Commerce\PaymentGateway\ExpressCheckout
+   */
+  protected $paymentPlugin;
+
+  /**
    * ExpressCheckoutPayment constructor.
    * @param \Drupal\commerce_payment\PaymentGatewayManager $paymentGatewayManager
    */
-  public function __construct(PaymentGatewayManager $paymentGatewayManager, ConfigFactory $configFactory, CartProviderInterface $cartProvider) {
+  public function __construct(
+    PaymentGatewayManager $paymentGatewayManager,
+    CartProviderInterface $cartProvider,
+    RequestStack $requestStack
+
+  ) {
     $this->paymentGateway = $paymentGatewayManager;
-    $this->configFactory = $configFactory;
     $this->cartProvider = $cartProvider;
+    $this->requestStack = $requestStack;
+    $gateway = $this->entityTypeManager()
+      ->getStorage('commerce_payment_gateway')->loadByProperties([
+        'plugin' => 'paypal_express_checkout',
+      ]);
+    $gateway = reset($gateway);
+    $this->paymentPlugin = $gateway->getPlugin();
   }
 
 
   public static function create(ContainerInterface $container) {
     return new static(
       $container->get('plugin.manager.commerce_payment_gateway'),
-      $container->get('config.factory'),
-      $container->get('commerce_cart.cart_provider')
+      $container->get('commerce_cart.cart_provider'),
+      $container->get('request_stack')
     );
   }
 
@@ -63,24 +81,22 @@ class ExpressCheckoutPayment extends ControllerBase {
    *   Return Hello string.
    */
   public function createPayment() {
-
     // @todo probably some caching.
 
     $payment_storage = $this->entityTypeManager()
       ->getStorage('commerce_payment');
 
-    $config = $this->configFactory->get('commerce_payment.commerce_payment_gateway.paypal_ec');
-    $_config = $config->get();
-    /** @var ExpressCheckout $instance */
-    $instance = $this->paymentGateway->createInstance('paypal_express_checkout', $config->get()['configuration']);
     $carts = $this->getCarts();
     if (!$carts) {
       throw new \Exception('No carts found');
     }
     // @todo not sure how to deal with multiple carts at this point
+    // @todo more and more sure this is not correct.
     /** @var Order $cart */
     $cart = array_pop($carts);
 
+
+    // @todo somthing might be wrong here as we're creating a payment, but creating another in ExpressCheckout::onReturn().
     /** @var Payment $payment */
     $payment = $payment_storage->create([
       'state' => 'new',
@@ -92,13 +108,43 @@ class ExpressCheckoutPayment extends ControllerBase {
     $extra = [
       'return_url' => $this->buildReturnUrl($cart)->toString(),
       'cancel_url' => $this->buildCancelUrl($cart)->toString(),
-      'capture' => TRUE,
+      'capture' => TRUE, // @todo hardcoding this can't be right
     ];
 
-    $paypal_response = $instance->setExpressCheckout($payment, $extra);
+    // @todo we have an opportunity to capture some errors here
+    $paypal_response = $this->paymentPlugin->setExpressCheckout($payment, $extra);
+
+    $order = $payment->getOrder();
+    $order->setData('paypal_express_checkout', [
+      'flow' => 'ec',
+      'token' => $paypal_response['TOKEN'],
+      'payerid' => FALSE,
+      'capture' => $extra['capture'],
+    ]);
+    $order->save();
+
     return new Response(Json::encode([
-      'paymentID' => $paypal_response['TOKEN']
+      'paymentID' => $paypal_response['TOKEN'],
+      'orderID' => $cart->id(),
     ]));
+  }
+
+  public function onReturn() {
+    $method = $this->requestStack->getCurrentRequest()->getMethod();
+    if ($this->requestStack->getCurrentRequest()->getMethod() == 'POST') {
+      $request = $this->requestStack->getCurrentRequest();
+      $test = $request->get('test');
+      $data = $this->requestStack->getParentRequest()->query->all();
+      $carts = $this->getCarts();
+      // @todo can't be right
+      /** @var Order $order */
+      $order = array_pop($carts);
+
+      $onReturn = $this->paymentPlugin->onReturn($order, $request);
+
+      // @todo payment
+    }
+
   }
 
   protected function getCarts() {
@@ -110,7 +156,6 @@ class ExpressCheckoutPayment extends ControllerBase {
 
     return $carts;
   }
-
 
   // Straight outta PaymentProcess.php
 

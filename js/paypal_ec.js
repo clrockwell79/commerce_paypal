@@ -1,4 +1,3 @@
-console.log('here');
 paypal.Button.render({
 
   env: 'sandbox', // sandbox | production
@@ -14,7 +13,7 @@ paypal.Button.render({
 
     // Set up a url on your server to create the payment
     // @todo should probably use the route here: commerce_paypal.express_checkout_payment_createPayment
-    var CREATE_URL = '/commerce_paypal/create-payment';
+    var CREATE_URL = '/commerce_paypal/express-checkout/set-express-checkout';
 
     // Make a call to your server to set up the payment
     return paypal.request.post(CREATE_URL)
@@ -27,13 +26,7 @@ paypal.Button.render({
   onAuthorize: function(data, actions) {
 
     // Set up a url on your server to execute the payment
-    var EXECUTE_URL = '/commerce_paypal/express-checkout/create';
-
-    // Set up the data you need to pass to your server
-    var data = {
-      paymentID: data.paymentID,
-      payerID: data.payerID
-    };
+    var EXECUTE_URL = '/commerce_paypal/express-checkout/return';
 
     // Make a call to your server to execute the payment
     return paypal.request.post(EXECUTE_URL, data)
