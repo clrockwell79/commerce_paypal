@@ -2,14 +2,17 @@
 
 namespace Drupal\commerce_paypal\Controller;
 
+use Drupal\commerce\Response\NeedsRedirectException;
 use Drupal\commerce_cart\CartProviderInterface;
 use Drupal\commerce_order\Entity\Order;
 use Drupal\commerce_payment\Entity\Payment;
+use Drupal\commerce_payment\Entity\PaymentGateway;
 use Drupal\commerce_payment\PaymentGatewayManager;
 use Drupal\Component\Serialization\Json;
 use Drupal\Core\Controller\ControllerBase;
 use Drupal\Core\Url;
 use Symfony\Component\DependencyInjection\ContainerInterface;
+use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\HttpFoundation\Response;
 
@@ -18,8 +21,9 @@ use Symfony\Component\HttpFoundation\Response;
  */
 class ExpressCheckoutPayment extends ControllerBase {
 
+
   /**
-   * @var \Drupal\commerce_payment\PaymentGatewayManager
+   * @var \Drupal\commerce|PaymentGateway
    */
   protected $paymentGateway;
 
@@ -48,27 +52,20 @@ class ExpressCheckoutPayment extends ControllerBase {
    * ExpressCheckoutPayment constructor.
    * @param \Drupal\commerce_payment\PaymentGatewayManager $paymentGatewayManager
    */
-  public function __construct(
-    PaymentGatewayManager $paymentGatewayManager,
-    CartProviderInterface $cartProvider,
-    RequestStack $requestStack
-
-  ) {
-    $this->paymentGateway = $paymentGatewayManager;
+  public function __construct(CartProviderInterface $cartProvider, RequestStack $requestStack) {
     $this->cartProvider = $cartProvider;
     $this->requestStack = $requestStack;
     $gateway = $this->entityTypeManager()
       ->getStorage('commerce_payment_gateway')->loadByProperties([
         'plugin' => 'paypal_express_checkout',
       ]);
-    $gateway = reset($gateway);
-    $this->paymentPlugin = $gateway->getPlugin();
+    $this->paymentGateway = reset($gateway);
+    $this->paymentPlugin = $this->paymentGateway->getPlugin();
   }
 
 
   public static function create(ContainerInterface $container) {
     return new static(
-      $container->get('plugin.manager.commerce_payment_gateway'),
       $container->get('commerce_cart.cart_provider'),
       $container->get('request_stack')
     );
@@ -105,6 +102,7 @@ class ExpressCheckoutPayment extends ControllerBase {
       'order_id' => $cart->id(),
     ]);
 
+    // @todo these don't seem to be doing anything, but I think they should.
     $extra = [
       'return_url' => $this->buildReturnUrl($cart)->toString(),
       'cancel_url' => $this->buildCancelUrl($cart)->toString(),
@@ -136,15 +134,23 @@ class ExpressCheckoutPayment extends ControllerBase {
       $test = $request->get('test');
       $data = $this->requestStack->getParentRequest()->query->all();
       $carts = $this->getCarts();
+      $payment_method_storage = $this->entityTypeManager()
+        ->getStorage('commerce_payment_method');
+
       // @todo can't be right
       /** @var Order $order */
       $order = array_pop($carts);
-
-      $onReturn = $this->paymentPlugin->onReturn($order, $request);
-
-      // @todo payment
+      $order->set('payment_gateway', $this->paymentGateway);
+      $this->paymentPlugin->onReturn($order, $request);
+      // I prefer the "throw-it-all-at-the-wall-and-see-what-sticks" method
+      $transition = $order->getState()->getWorkflow()->getTransition('place');
+      $order->getState()->applyTransition($transition);
+      $order->save();
+      throw new NeedsRedirectException(Url::fromRoute('commerce_checkout.form', [
+        'commerce_order' => $order->id(),
+        'step' => 'complete',
+      ])->toString());
     }
-
   }
 
   protected function getCarts() {
@@ -170,7 +176,7 @@ class ExpressCheckoutPayment extends ControllerBase {
   protected function buildReturnUrl($cart) {
     return Url::fromRoute('commerce_payment.checkout.return', [
       'commerce_order' => $cart->id(),
-      'step' => 'payment',
+      'step' => 'complete',
     ], ['absolute' => TRUE]);
   }
 

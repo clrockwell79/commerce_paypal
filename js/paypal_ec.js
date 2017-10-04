@@ -2,10 +2,6 @@ paypal.Button.render({
 
   env: 'sandbox', // sandbox | production
 
-  client: {
-    sandbox:    'Aa5FCTG0zocLNNLB2GJu2x_chZNdea0z8blrc0uyJ9Scd90ik9c35yW4Z8brGDzoGsugnh8FFF_cPmyT'
-  },
-
   // Show the buyer a 'Pay Now' button in the checkout flow
   commit: true,
   // payment() is called when the button is clicked
@@ -23,16 +19,15 @@ paypal.Button.render({
   },
 
   // onAuthorize() is called when the buyer approves the payment
-  onAuthorize: function(data, actions) {
+  onAuthorize: function(data, paypal_actions) {
 
     // Set up a url on your server to execute the payment
     var EXECUTE_URL = '/commerce_paypal/express-checkout/return';
 
+
     // Make a call to your server to execute the payment
-    return paypal.request.post(EXECUTE_URL, data)
-      .then(function (res) {
-        window.alert('Payment Complete!');
-      });
+    paypal.request.post(EXECUTE_URL, data)
+      .then(function (res) {});
   }
 
 }, '#paypal-button-container');
