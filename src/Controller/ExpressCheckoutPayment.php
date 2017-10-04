@@ -7,6 +7,7 @@ use Drupal\commerce_cart\CartProviderInterface;
 use Drupal\commerce_order\Entity\Order;
 use Drupal\commerce_payment\Entity\Payment;
 use Drupal\commerce_payment\Entity\PaymentGateway;
+use Drupal\commerce_payment\Exception\PaymentGatewayException;
 use Drupal\commerce_payment\PaymentGatewayManager;
 use Drupal\Component\Serialization\Json;
 use Drupal\Core\Controller\ControllerBase;
@@ -141,7 +142,11 @@ class ExpressCheckoutPayment extends ControllerBase {
       /** @var Order $order */
       $order = array_pop($carts);
       $order->set('payment_gateway', $this->paymentGateway);
-      $this->paymentPlugin->onReturn($order, $request);
+      try {
+        $this->paymentPlugin->onReturn($order, $request);
+      } catch (PaymentGatewayException $exception) {
+        // do something - like cancel moving the order into complete state.
+      }
       // I prefer the "throw-it-all-at-the-wall-and-see-what-sticks" method
       $transition = $order->getState()->getWorkflow()->getTransition('place');
       $order->getState()->applyTransition($transition);
