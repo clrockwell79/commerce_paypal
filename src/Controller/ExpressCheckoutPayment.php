@@ -2,13 +2,11 @@
 
 namespace Drupal\commerce_paypal\Controller;
 
-use Drupal\commerce\Response\NeedsRedirectException;
 use Drupal\commerce_cart\CartProviderInterface;
 use Drupal\commerce_order\Entity\Order;
 use Drupal\commerce_payment\Entity\Payment;
 use Drupal\commerce_payment\Entity\PaymentGateway;
 use Drupal\commerce_payment\Exception\PaymentGatewayException;
-use Drupal\commerce_payment\PaymentGatewayManager;
 use Drupal\Component\Serialization\Json;
 use Drupal\Core\Controller\ControllerBase;
 use Drupal\Core\Url;
@@ -147,14 +145,13 @@ class ExpressCheckoutPayment extends ControllerBase {
       } catch (PaymentGatewayException $exception) {
         // do something - like cancel moving the order into complete state.
       }
-      // I prefer the "throw-it-all-at-the-wall-and-see-what-sticks" method
-      $transition = $order->getState()->getWorkflow()->getTransition('place');
-      $order->getState()->applyTransition($transition);
+      $order->set('checkout_step', 'payment');
       $order->save();
-      throw new NeedsRedirectException(Url::fromRoute('commerce_checkout.form', [
+      $url = Url::fromRoute('commerce_payment.checkout.return', [
         'commerce_order' => $order->id(),
-        'step' => 'complete',
-      ])->toString());
+        'step' => 'payment',
+      ])->toString();
+      return new RedirectResponse($url);
     }
   }
 

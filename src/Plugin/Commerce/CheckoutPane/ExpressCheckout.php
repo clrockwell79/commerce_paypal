@@ -9,9 +9,9 @@ use Drupal\Core\Form\FormStateInterface;
 
 /**
  * @CommerceCheckoutPane(
- *  id = "commerce_checkout_pane",
- *  label = @Translation("The plugin ID."),
- *  display_label = @Translation("The plugin ID."),
+ *  id = "express_checkout_pane",
+ *  label = @Translation("PayPal Express Checkout"),
+ *  display_label = @Translation("PayPal Express Checkout"),
  *  default_step = "string",
  *  wrapper_element = "string",
  * )
