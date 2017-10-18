@@ -1,0 +1,25 @@
+<?php
+
+/**
+ * Implements hook_theme().
+ */
+function commerce_paypal_theme($existing, $type, $theme, $path) {
+  $theme = [
+    'commerce_paypal_express_checkout' => [
+      'variables' => [],
+    ],
+  ];
+
+  return $theme;
+}
+
+/**
+ * Implements hook_form_alter().
+ */
+function commerce_paypal_form_alter(&$form, \Drupal\Core\Form\FormStateInterface $form_state, $form_id) {
+//  if ($form_id == 'commerce_checkout_flow_multistep_default') {
+//    if (isset($form['payment_information']['payment_method']['paypal_ec'])) {
+//      unset($form['payment_information']['payment_method']['#options']['paypal_ec']);
+//    }
+//  }
+}

@@ -2,7 +2,8 @@
 
 namespace Drupal\commerce_paypal\Plugin\Commerce\PaymentGateway;
 
-use Drupal\Component\Datetime\TimeInterface;
+use Drupal\commerce_paypal\Event\ExpressCheckoutRequestEvent;
+use Drupal\commerce_paypal\Event\PayPalEvents;
 use Drupal\commerce_order\Entity\OrderInterface;
 use Drupal\commerce_payment\Entity\PaymentInterface;
 use Drupal\commerce_payment\Exception\InvalidRequestException;
@@ -13,10 +14,13 @@ use Drupal\commerce_payment\Plugin\Commerce\PaymentGateway\OffsitePaymentGateway
 use Drupal\commerce_paypal\IPNHandlerInterface;
 use Drupal\commerce_price\Price;
 use Drupal\commerce_price\RounderInterface;
+use Drupal\Component\Datetime\TimeInterface;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
+use Drupal\Core\Extension\ModuleHandlerInterface;
 use Drupal\Core\Form\FormStateInterface;
 use Drupal\Core\Logger\LoggerChannelFactoryInterface;
 use GuzzleHttp\ClientInterface;
+use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
@@ -38,6 +42,11 @@ use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
  * )
  */
 class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressCheckoutInterface {
+
+  // Shipping address collection options.
+  const SHIPPING_ASK_ALWAYS = 'shipping_ask_always';
+  const SHIPPING_ASK_NOT_PRESENT = 'shipping_ask_not_present';
+  const SHIPPING_SKIP = 'shipping_skip';
 
   /**
    * The logger.
@@ -63,7 +72,7 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
   /**
    * The time.
    *
-   * @var \Drupal\commerce\TimeInterface
+   * @var \Drupal\Component\Datetime\TimeInterface
    */
   protected $time;
 
@@ -73,6 +82,20 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
    * @var \Drupal\commerce_paypal\IPNHandlerInterface
    */
   protected $ipnHandler;
+
+  /**
+   * Module handler service.
+   *
+   * @var \Drupal\Core\Extension\ModuleHandlerInterface
+   */
+  protected $moduleHandler;
+
+  /**
+   * The event dispatcher.
+   *
+   * @var \Symfony\Component\EventDispatcher\EventDispatcherInterface
+   */
+  protected $eventDispatcher;
 
   /**
    * Constructs a new PaymentGatewayBase object.
@@ -89,24 +112,30 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
    *   The payment type manager.
    * @param \Drupal\commerce_payment\PaymentMethodTypeManager $payment_method_type_manager
    *   The payment method type manager.
+   * @param \Drupal\Component\Datetime\TimeInterface $time
+   *   The time.
    * @param \Drupal\Core\Logger\LoggerChannelFactoryInterface $logger_channel_factory
    *   The logger channel factory.
    * @param \GuzzleHttp\ClientInterface $client
    *   The client.
    * @param \Drupal\commerce_price\RounderInterface $rounder
    *   The price rounder.
-   * @param \Drupal\commerce\TimeInterface $time
-   *   The time.
    * @param \Drupal\commerce_paypal\IPNHandlerInterface $ip_handler
    *   The IPN handler.
+   * @param \Drupal\Core\Extension\ModuleHandlerInterface $module_handler
+   *   The module handler.
+   * @param \Symfony\Component\EventDispatcher\EventDispatcherInterface $event_dispatcher
+   *   The event dispatcher.
    */
-  public function __construct(array $configuration, $plugin_id, $plugin_definition, EntityTypeManagerInterface $entity_type_manager, PaymentTypeManager $payment_type_manager, PaymentMethodTypeManager $payment_method_type_manager, LoggerChannelFactoryInterface $logger_channel_factory, ClientInterface $client, RounderInterface $rounder, TimeInterface $time, IPNHandlerInterface $ip_handler) {
-    parent::__construct($configuration, $plugin_id, $plugin_definition, $entity_type_manager, $payment_type_manager, $payment_method_type_manager);
+  public function __construct(array $configuration, $plugin_id, $plugin_definition, EntityTypeManagerInterface $entity_type_manager, PaymentTypeManager $payment_type_manager, PaymentMethodTypeManager $payment_method_type_manager, TimeInterface $time, LoggerChannelFactoryInterface $logger_channel_factory, ClientInterface $client, RounderInterface $rounder, IPNHandlerInterface $ip_handler, ModuleHandlerInterface $module_handler, EventDispatcherInterface $event_dispatcher) {
+    parent::__construct($configuration, $plugin_id, $plugin_definition, $entity_type_manager, $payment_type_manager, $payment_method_type_manager, $time);
+
     $this->logger = $logger_channel_factory->get('commerce_paypal');
     $this->httpClient = $client;
     $this->rounder = $rounder;
-    $this->time = $time;
     $this->ipnHandler = $ip_handler;
+    $this->moduleHandler = $module_handler;
+    $this->eventDispatcher = $event_dispatcher;
   }
 
   /**
@@ -120,11 +149,13 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
       $container->get('entity_type.manager'),
       $container->get('plugin.manager.commerce_payment_type'),
       $container->get('plugin.manager.commerce_payment_method_type'),
+      $container->get('datetime.time'),
       $container->get('logger.factory'),
       $container->get('http_client'),
       $container->get('commerce_price.rounder'),
-      $container->get('datetime.time'),
-      $container->get('commerce_paypal.ipn_handler')
+      $container->get('commerce_paypal.ipn_handler'),
+      $container->get('module_handler'),
+      $container->get('event_dispatcher')
     );
   }
 
@@ -135,6 +166,7 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
     return [
       'api_username' => '',
       'api_password' => '',
+      'shipping_prompt' => self::SHIPPING_SKIP,
       'signature' => '',
       'solution_type' => 'Mark',
     ] + parent::defaultConfiguration();
@@ -177,6 +209,23 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
       '#default_value' => $this->configuration['solution_type'],
     ];
 
+    $form['shipping_prompt'] = [
+      '#type' => 'radios',
+      '#title' => $this->t('Shipping address collection'),
+      '#description' => $this->t('Express Checkout will only request a shipping address if the Shipping module is enabled to store the address in the order.'),
+      '#options' => [
+        self::SHIPPING_SKIP => $this->t('Do not ask for a shipping address at PayPal.'),
+      ],
+      '#default_value' => $this->configuration['shipping_prompt'],
+    ];
+
+    if ($this->moduleHandler->moduleExists('commerce_shipping')) {
+      $form['shipping_prompt']['#options'] += [
+        self::SHIPPING_ASK_NOT_PRESENT => $this->t('Ask for a shipping address at PayPal if the order does not have one yet.'),
+        self::SHIPPING_ASK_ALWAYS => $this->t('Ask for a shipping address at PayPal even if the order already has one.'),
+      ];
+    }
+
     return $form;
   }
 
@@ -215,6 +264,7 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
       $this->configuration['api_password'] = $values['api_password'];
       $this->configuration['signature'] = $values['signature'];
       $this->configuration['solution_type'] = $values['solution_type'];
+      $this->configuration['shipping_prompt'] = $values['shipping_prompt'];
     }
   }
 
@@ -257,16 +307,13 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
     }
 
     $payment_storage = $this->entityTypeManager->getStorage('commerce_payment');
-    $request_time = $this->time->getRequestTime();
     $payment = $payment_storage->create([
       'state' => 'authorization',
       'amount' => $order->getTotalPrice(),
       'payment_gateway' => $this->entityId,
       'order_id' => $order->id(),
-      'test' => $this->getMode() == 'test',
       'remote_id' => $paypal_response['PAYMENTINFO_0_TRANSACTIONID'],
       'remote_state' => $paypal_response['PAYMENTINFO_0_PAYMENTSTATUS'],
-      'authorized' => $request_time,
     ]);
 
     // Process payment status received.
@@ -283,15 +330,15 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
 
       case 'Completed':
       case 'Processed':
-        $payment->state = 'capture_completed';
+        $payment->state = 'completed';
         break;
 
       case 'Refunded':
-        $payment->state = 'capture_refunded';
+        $payment->state = 'refunded';
         break;
 
       case 'Partially-Refunded':
-        $payment->state = 'capture_partially_refunded';
+        $payment->state = 'partially_refunded';
         break;
 
       case 'Expired':
@@ -306,9 +353,7 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
    * {@inheritdoc}
    */
   public function capturePayment(PaymentInterface $payment, Price $amount = NULL) {
-    if ($payment->getState()->value != 'authorization') {
-      throw new \InvalidArgumentException('Only payments in the "authorization" state can be captured.');
-    }
+    $this->assertPaymentState($payment, ['authorization']);
     // If not specified, capture the entire amount.
     $amount = $amount ?: $payment->getAmount();
     $amount = $this->rounder->round($amount);
@@ -322,10 +367,8 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
       throw new PaymentGatewayException($message, $paypal_response['L_ERRORCODE0']);
     }
 
-    $payment->state = 'capture_completed';
+    $payment->setState('completed');
     $payment->setAmount($amount);
-    $request_time = \Drupal::service('commerce.time')->getRequestTime();
-    $payment->setCapturedTime($request_time);
     // Update the remote id for the captured transaction.
     $payment->setRemoteId($paypal_response['TRANSACTIONID']);
     $payment->save();
@@ -335,20 +378,17 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
    * {@inheritdoc}
    */
   public function voidPayment(PaymentInterface $payment) {
-    if ($payment->getState()->value != 'authorization') {
-      throw new \InvalidArgumentException('Only payments in the "authorization" state can be voided.');
-    }
+    $this->assertPaymentState($payment, ['authorization']);
 
     // GetExpressCheckoutDetails API Operation (NVP).
     // Shows information about an Express Checkout transaction.
     $paypal_response = $this->doVoid($payment);
-
     if ($paypal_response['ACK'] == 'Failure') {
       $message = $paypal_response['L_LONGMESSAGE0'];
       throw new PaymentGatewayException($message, $paypal_response['L_ERRORCODE0']);
     }
 
-    $payment->state = 'authorization_voided';
+    $payment->setState('authorization_voided');
     $payment->save();
   }
 
@@ -356,29 +396,22 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
    * {@inheritdoc}
    */
   public function refundPayment(PaymentInterface $payment, Price $amount = NULL) {
-    if (!in_array($payment->getState()->value, ['capture_completed', 'capture_partially_refunded'])) {
-      throw new \InvalidArgumentException('Only payments in the "capture_completed" and "capture_partially_refunded" states can be refunded.');
-    }
+    $this->assertPaymentState($payment, ['completed', 'partially_refunded']);
     // If not specified, refund the entire amount.
     $amount = $amount ?: $payment->getAmount();
+    $this->assertRefundAmount($payment, $amount);
     $amount = $this->rounder->round($amount);
-    // Validate the requested amount.
-    $balance = $payment->getBalance();
-    if ($amount->greaterThan($balance)) {
-      throw new InvalidRequestException(sprintf('Can\'t refund more than %s.', (string) $balance));
-    }
 
     $extra['amount'] = $amount->getNumber();
-
     // Check if the Refund is partial or full.
     $old_refunded_amount = $payment->getRefundedAmount();
     $new_refunded_amount = $old_refunded_amount->add($amount);
     if ($new_refunded_amount->lessThan($payment->getAmount())) {
-      $payment->state = 'capture_partially_refunded';
+      $payment->setState('partially_refunded');
       $extra['refund_type'] = 'Partial';
     }
     else {
-      $payment->state = 'capture_refunded';
+      $payment->setState('refunded');
       if ($amount->lessThan($payment->getAmount())) {
         $extra['refund_type'] = 'Partial';
       }
@@ -441,8 +474,7 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
           break;
 
         case 'Completed':
-          $payment->state = 'capture_completed';
-          $payment->setCapturedTime($this->time->getRequestTime());
+          $payment->state = 'completed';
           break;
       }
       // Update the remote id.
@@ -455,7 +487,7 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
         $this->logger->warning('IPN for Order @order_number ignored: the transaction to be refunded does not exist.', ['@order_number' => $ipn_data['invoice']]);
         return FALSE;
       }
-      elseif ($payment->getState() == 'capture_refunded') {
+      elseif ($payment->getState() == 'refunded') {
         $this->logger->warning('IPN for Order @order_number ignored: the transaction is already refunded.', ['@order_number' => $ipn_data['invoice']]);
         return FALSE;
       }
@@ -464,10 +496,10 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
       $old_refunded_amount = $payment->getRefundedAmount();
       $new_refunded_amount = $old_refunded_amount->add($amount);
       if ($new_refunded_amount->lessThan($payment->getAmount())) {
-        $payment->state = 'capture_partially_refunded';
+        $payment->setState('partially_refunded');
       }
       else {
-        $payment->state = 'capture_refunded';
+        $payment->setState('refunded');
       }
       $payment->setRefundedAmount($new_refunded_amount);
     }
@@ -483,7 +515,7 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
     if (isset($payment)) {
       $payment->currency_code = $ipn_data['mc_currency'];
       // Set the transaction's statuses based on the IPN's payment_status.
-      $payment->remote_state = $ipn_data['payment_status'];
+      $payment->setRemoteState($ipn_data['payment_status']);
       // Save the transaction information.
       $payment->save();
     }
@@ -492,12 +524,24 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
   /**
    * {@inheritdoc}
    */
-  public function getUrl() {
+  public function getRedirectUrl() {
     if ($this->getMode() == 'test') {
       return 'https://www.sandbox.paypal.com/checkoutnow';
     }
     else {
       return 'https://www.paypal.com/checkoutnow';
+    }
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function getApiUrl() {
+    if ($this->getMode() == 'test') {
+      return 'https://api-3t.sandbox.paypal.com/nvp';
+    }
+    else {
+      return 'https://api-3t.paypal.com/nvp';
     }
   }
 
@@ -517,7 +561,6 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
       $payment_action = 'Authorization';
     }
 
-    $flow = 'ec';
     // Build a name-value pair array for this transaction.
     $nvp_data = [
       'METHOD' => 'SetExpressCheckout',
@@ -533,40 +576,12 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
       'PAYMENTREQUEST_0_PAYMENTACTION' => $payment_action,
       'PAYMENTREQUEST_0_AMT' => $amount->getNumber(),
       'PAYMENTREQUEST_0_CURRENCYCODE' => $amount->getCurrencyCode(),
-      'PAYMENTREQUEST_0_INVNUM' => $order->id(),
+      'PAYMENTREQUEST_0_INVNUM' => $order->uuid(),
 
       // Set the return and cancel URLs.
       'RETURNURL' => $extra['return_url'],
       'CANCELURL' => $extra['cancel_url'],
     ];
-
-    $order_express_checkout_data = $order->getData('paypal_express_checkout');
-    if (!empty($order_express_checkout_data['token'])) {
-      $nvp_data['TOKEN'] = $order_express_checkout_data['token'];
-    }
-
-    $n = 0;
-    // Add order item data.
-    foreach ($order->getItems() as $item) {
-      $item_amount = $this->rounder->round($item->getUnitPrice());
-      $nvp_data += [
-        'L_PAYMENTREQUEST_0_NAME' . $n => $item->getTitle(),
-        'L_PAYMENTREQUEST_0_AMT' . $n => $item_amount->getNumber(),
-        'L_PAYMENTREQUEST_0_QTY' . $n => $item->getQuantity(),
-      ];
-      $n++;
-    }
-
-    // Add all adjustments.
-    foreach ($order->collectAdjustments() as $adjustment) {
-      $adjustment_amount = $this->rounder->round($adjustment->getAmount());
-      $nvp_data += [
-        'L_PAYMENTREQUEST_0_NAME' . $n => $adjustment->getLabel(),
-        'L_PAYMENTREQUEST_0_AMT' . $n => $adjustment_amount->getNumber(),
-        'L_PAYMENTREQUEST_0_QTY' . $n => 1,
-      ];
-      $n++;
-    }
 
     // Check if there is a reference transaction, and also see if a billing
     // agreement was supplied.
@@ -586,19 +601,182 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
       }
     }
 
-    // @todo Shipping data.
-    $nvp_data['NOSHIPPING'] = '1';
+    // Add itemized information to the API request.
+    $nvp_data += $this->itemizeOrder($order, $amount->getCurrencyCode());
 
-    // Overrides specific values for the BML payment method.
-    if ($flow == 'bml') {
-      $nvp_data['USERSELECTEDFUNDINGSOURCE'] = 'BML';
-      $nvp_data['SOLUTIONTYPE'] = 'SOLE';
-      $nvp_data['LANDINGPAGE'] = 'BILLING';
+    // If the shipping module is not enabled, or if
+    // "Shipping address collection" is configured to not send the address to
+    // PayPal, set the NOSHIPPING parameter to 1.
+    if ($configuration['shipping_prompt'] == self::SHIPPING_SKIP || !$this->moduleHandler->moduleExists('commerce_shipping')) {
+      $nvp_data['NOSHIPPING'] = '1';
+    }
+    else {
+      // Check if the order references shipments.
+      if ($order->hasField('shipments') && !$order->get('shipments')->isEmpty()) {
+        // Gather the shipping profiles and only send shipping information if
+        // there's only one shipping profile referenced by the shipments.
+        $shipping_profiles = [];
+
+        // Loop over the shipments to collect shipping profiles.
+        foreach ($order->get('shipments')->referencedEntities() as $shipment) {
+          if ($shipment->get('shipping_profile')->isEmpty()) {
+            continue;
+          }
+          $shipping_profile = $shipment->getShippingProfile();
+          $shipping_profiles[$shipping_profile->id()] = $shipping_profile;
+        }
+
+        // Don't send the shipping profile if we found more than one.
+        if ($shipping_profiles && count($shipping_profiles) === 1) {
+          $shipping_profile = reset($shipping_profiles);
+          /** @var \Drupal\address\AddressInterface $address */
+          $address = $shipping_profile->address->first();
+          $name = $address->getGivenName() . ' ' . $address->getFamilyName();
+          $shipping_info = [
+            'PAYMENTREQUEST_0_SHIPTONAME' => substr($name, 0, 32),
+            'PAYMENTREQUEST_0_SHIPTOSTREET' => substr($address->getAddressLine1(), 0, 100),
+            'PAYMENTREQUEST_0_SHIPTOSTREET2' => substr($address->getAddressLine2(), 0, 100),
+            'PAYMENTREQUEST_0_SHIPTOCITY' => substr($address->getLocality(), 0, 40),
+            'PAYMENTREQUEST_0_SHIPTOSTATE' => substr($address->getAdministrativeArea(), 0, 40),
+            'PAYMENTREQUEST_0_SHIPTOCOUNTRYCODE' => $address->getCountryCode(),
+            'PAYMENTREQUEST_0_SHIPTOZIP' => substr($address->getPostalCode(), 0, 20),
+          ];
+          // Filter out empty values.
+          $nvp_data += array_filter($shipping_info);
+
+          // Do not prompt for an Address at Paypal.
+          if ($configuration['shipping_prompt'] != self::SHIPPING_ASK_ALWAYS) {
+            $nvp_data += [
+              'NOSHIPPING' => '1',
+              'ADDROVERRIDE' => '1',
+            ];
+          }
+          else {
+            $nvp_data += [
+              'NOSHIPPING' => '0',
+              'ADDROVERRIDE' => '0',
+            ];
+          }
+        }
+        else {
+          $nvp_data['NOSHIPPING'] = '0';
+        }
+      }
+    }
+
+    // Send the order's email if not empty.
+    if (!empty($order->getEmail())) {
+      $nvp_data['PAYMENTREQUEST_0_EMAIL'] = $order->getEmail();
     }
 
     // Make the PayPal NVP API request.
-    return $this->doRequest($nvp_data);
+    return $this->doRequest($nvp_data, $order);
+  }
 
+  /**
+   * Returns a name-value pair array of information to the API request.
+   *
+   * @param \Drupal\commerce_order\Entity\OrderInterface $order
+   *   The order entity.
+   * @param string $currency_code
+   *   The currency code.
+   *
+   * @return array
+   *   A name-value pair array.
+   */
+  protected function itemizeOrder(OrderInterface $order, $currency_code) {
+    $nvp_data = [];
+    $n = 0;
+    // Calculate the items total.
+    $items_total = new Price('0', $currency_code);
+
+    // Add order item data.
+    foreach ($order->getItems() as $item) {
+      $item_amount = $this->rounder->round($item->getUnitPrice());
+      $nvp_data += [
+        'L_PAYMENTREQUEST_0_NAME' . $n => $item->getTitle(),
+        'L_PAYMENTREQUEST_0_AMT' . $n => $item_amount->getNumber(),
+        'L_PAYMENTREQUEST_0_QTY' . $n => $item->getQuantity(),
+      ];
+      $items_total = $items_total->add($item->getTotalPrice());
+      $n++;
+    }
+
+    // Initialize Shipping|Tax prices, they need to be sent
+    // separately to PayPal.
+    $shipping_amount = new Price('0', $currency_code);
+    $tax_amount = new Price('0', $currency_code);
+
+    // Collect the adjustments.
+    $adjustments = [];
+    foreach ($order->collectAdjustments() as $adjustment) {
+      // Skip included adjustments.
+      if ($adjustment->isIncluded()) {
+        continue;
+      }
+      // Tax & Shipping adjustments need to be handled separately.
+      if ($adjustment->getType() == 'shipping') {
+        $shipping_amount = $shipping_amount->add($adjustment->getAmount());
+      }
+      // Add taxes that are not included in the items total.
+      elseif ($adjustment->getType() == 'tax') {
+        $tax_amount = $tax_amount->add($adjustment->getAmount());
+      }
+      else {
+        // Collect other adjustments.
+        $type = $adjustment->getType();
+        $source_id = $adjustment->getSourceId();
+        if (empty($source_id)) {
+          // Adjustments without a source ID are always shown standalone.
+          $key = count($adjustments);
+        }
+        else {
+          // Adjustments with the same type and source ID are combined.
+          $key = $type . '_' . $source_id;
+        }
+
+        if (empty($adjustments[$key])) {
+          $adjustments[$key] = [
+            'type' => $type,
+            'label' => (string) $adjustment->getLabel(),
+            'total' => $adjustment->getAmount(),
+          ];
+        }
+        else {
+          $adjustments[$key]['total'] = $adjustments[$key]['total']->add($adjustment->getAmount());
+        }
+      }
+    }
+
+    foreach ($adjustments as $adjustment) {
+      $adjustment_amount = $this->rounder->round($adjustment['total']);
+      $nvp_data += [
+        'L_PAYMENTREQUEST_0_NAME' . $n => $adjustment['label'],
+        'L_PAYMENTREQUEST_0_AMT' . $n => $adjustment_amount->getNumber(),
+        'L_PAYMENTREQUEST_0_QTY' . $n => 1,
+      ];
+      // Add the adjustment to the items total.
+      $items_total = $items_total->add($adjustment['total']);
+      $n++;
+    }
+
+    // Send the items total.
+    $items_total = $this->rounder->round($items_total);
+    $nvp_data['PAYMENTREQUEST_0_ITEMAMT'] = $items_total->getNumber();
+
+    // Send the shipping amount separately.
+    if (!$shipping_amount->isZero()) {
+      $shipping_amount = $this->rounder->round($shipping_amount);
+      $nvp_data['PAYMENTREQUEST_0_SHIPPINGAMT'] = $shipping_amount->getNumber();
+    }
+
+    // Send the tax amount.
+    if (!$tax_amount->isZero()) {
+      $tax_amount = $this->rounder->round($tax_amount);
+      $nvp_data['PAYMENTREQUEST_0_TAXAMT'] = $tax_amount->getNumber();
+    }
+
+    return $nvp_data;
   }
 
   /**
@@ -615,7 +793,7 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
     ];
 
     // Make the PayPal NVP API request.
-    return $this->doRequest($nvp_data);
+    return $this->doRequest($nvp_data, $order);
 
   }
 
@@ -643,7 +821,7 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
     ];
 
     // Make the PayPal NVP API request.
-    return $this->doRequest($nvp_data);
+    return $this->doRequest($nvp_data, $order);
 
   }
 
@@ -664,7 +842,7 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
     ];
 
     // Make the PayPal NVP API request.
-    return $this->doRequest($nvp_data);
+    return $this->doRequest($nvp_data, $payment->getOrder());
 
   }
 
@@ -679,7 +857,7 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
     ];
 
     // Make the PayPal NVP API request.
-    return $this->doRequest($nvp_data);
+    return $this->doRequest($nvp_data, $payment->getOrder());
 
   }
 
@@ -687,7 +865,6 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
    * {@inheritdoc}
    */
   public function doRefundTransaction(PaymentInterface $payment, array $extra) {
-
     // Build a name-value pair array for this transaction.
     $nvp_data = [
       'METHOD' => 'RefundTransaction',
@@ -698,14 +875,14 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
     ];
 
     // Make the PayPal NVP API request.
-    return $this->doRequest($nvp_data);
+    return $this->doRequest($nvp_data, $payment->getOrder());
 
   }
 
   /**
    * {@inheritdoc}
    */
-  public function doRequest(array $nvp_data) {
+  public function doRequest(array $nvp_data, OrderInterface $order = NULL) {
     // Add the default name-value pairs to the array.
     $configuration = $this->getConfiguration();
     $nvp_data += [
@@ -716,16 +893,12 @@ class ExpressCheckout extends OffsitePaymentGatewayBase implements ExpressChecko
       'VERSION' => '124.0',
     ];
 
-    $mode = $this->getMode();
-    if ($mode == 'test') {
-      $url = 'https://api-3t.sandbox.paypal.com/nvp';
-    }
-    else {
-      $url = 'https://api-3t.paypal.com/nvp';
-    }
-
+    // Allow modules to alter the NVP request.
+    $event = new ExpressCheckoutRequestEvent($nvp_data, $order);
+    $this->eventDispatcher->dispatch(PayPalEvents::EXPRESS_CHECKOUT_REQUEST, $event);
+    $nvp_data = $event->getNvpData();
     // Make PayPal request.
-    $request = $this->httpClient->post($url, [
+    $request = $this->httpClient->post($this->getApiUrl(), [
       'form_params' => $nvp_data,
     ])->getBody()
       ->getContents();

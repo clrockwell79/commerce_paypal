@@ -1,0 +1,14 @@
+commerce_paypal.express_checkout_payment_createPayment:
+  path: '/commerce_paypal/express-checkout/set-express-checkout'
+  defaults:
+    _controller: '\Drupal\commerce_paypal\Controller\ExpressCheckoutPayment::createPayment'
+    _title: 'Create Payment'
+  requirements:
+    _permission: 'access content'
+commerce_paypal.express_checkout_payment_return:
+  path: '/commerce_paypal/express-checkout/return'
+  defaults:
+    _controller: '\Drupal\commerce_paypal\Controller\ExpressCheckoutPayment::onReturn'
+    _title: 'Create Payment'
+  requirements:
+    _permission: 'access content'

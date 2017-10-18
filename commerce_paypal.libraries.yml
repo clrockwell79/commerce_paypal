@@ -1,0 +1,12 @@
+paypal.checkout:
+  remote: https://www.paypalobjects.com/api/checkout.js
+  license:
+    name: MIT
+    gpl-compatible: true
+  js:
+    https://www.paypalobjects.com/api/checkout.js: {}
+express-checkout:
+  js:
+    js/paypal_ec.js: {}
+  dependencies:
+    - commerce_paypal/paypal.checkout
